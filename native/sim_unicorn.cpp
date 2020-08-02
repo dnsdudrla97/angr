@@ -215,6 +215,7 @@ typedef enum stop {
 	STOP_UNSUPPORTED_EXPR_GETI,
 	STOP_UNSUPPORTED_EXPR_UNKNOWN,
 	STOP_UNKNOWN_MEMORY_WRITE,
+	STOP_UNKNOWN_MEMORY_READ,
 } stop_t;
 
 typedef std::vector<std::pair<taint_entity_t, std::unordered_set<taint_entity_t>>> taint_vector_t;
@@ -365,7 +366,7 @@ private:
 	std::map<address_t, taint_t *> active_pages;
 	std::set<address_t> stop_points;
 
-	address_t taint_engine_next_instr_address;
+	address_t taint_engine_next_instr_address, taint_engine_mem_read_stop_instruction;
 
 	address_t unicorn_next_instr_addr;
 
@@ -627,6 +628,10 @@ public:
 			case STOP_UNKNOWN_MEMORY_WRITE:
 				// This likely happened because unicorn misreported PC value in memory write hook. See handle_write.
 				stop_reason_msg = "Cannot find a memory write at instruction; likely because unicorn reported PC value incorrectly";
+				break;
+			case STOP_UNKNOWN_MEMORY_READ:
+				// This likely happened because unicorn misreported PC value in memory read hook.
+				stop_reason_msg = "Unexpected PC value for memory read; likely because unicorn reported PC value incorrectly";
 				break;
 			default:
 				stop_reason_msg = "unknown error";
@@ -1783,6 +1788,7 @@ public:
 			if (curr_instr_taint_entry.has_memory_read) {
 				// Pause taint propagation to process the memory read and continue from instruction
 				// after the memory read.
+				taint_engine_mem_read_stop_instruction = curr_instr_addr;
 				taint_engine_next_instr_address = std::next(instr_taint_data_entries_it)->first;
 				break;
 			}
@@ -2147,6 +2153,10 @@ public:
 		}
 		return reg_offset;
 	}
+
+	inline address_t get_taint_engine_mem_read_stop_instruction() const {
+		return taint_engine_mem_read_stop_instruction;
+	}
 };
 
 static void hook_mem_read(uc_engine *uc, uc_mem_type type, uint64_t address, int size, int64_t value, void *user_data) {
@@ -2159,6 +2169,12 @@ static void hook_mem_read(uc_engine *uc, uc_mem_type type, uint64_t address, int
 	mem_read_result.address = address;
 	mem_read_result.size = size;
 	address_t curr_instr_addr = state->get_instruction_pointer();
+	if (curr_instr_addr != state->get_taint_engine_mem_read_stop_instruction()) {
+		// The instruction address unicorn reported is different from the expected value for memory read instruction.
+		// Also see https://github.com/unicorn-engine/unicorn/issues/1312.
+		state->stop(STOP_UNKNOWN_MEMORY_READ);
+		return;
+	}
 	auto tainted = state->find_tainted(address, size);
 	if (tainted != -1)
 	{
